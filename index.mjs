@@ -1,6 +1,7 @@
 import { copyFile } from 'node:fs/promises'
 import { join, resolve } from 'node:path'
 import { CONTINUE_EXTENSION, writeContinueConfig } from './lib/continue.mjs'
+import { installedCommand, Installer } from './lib/install.mjs'
 import { TEMPLATES } from './lib/templates.mjs'
 import { findCommand, VSCodeServer } from './lib/vscode.mjs'
 import { validateProjectId, Workspace, WorkspaceError } from './lib/workspace.mjs'
@@ -75,6 +76,18 @@ export async function listModels(url, apiKey, preferred = '') {
   return ids.slice(0, MAX_MODELS)
 }
 
+/**
+ * LLMHub shows panels only a generic message for a failed route, so expected failures are
+ * answered as `{ error }` and the panel displays them.
+ */
+export const answered = handler => async event => {
+  try { return await handler(event) }
+  catch (error) {
+    if (error instanceof WorkspaceError) return { error: error.message }
+    throw error
+  }
+}
+
 export default {
   async setup(api) {
     const root = () => resolve(String(api.config.workspace || '').trim() || join(process.cwd(), '.data/plugins'))
@@ -92,6 +105,14 @@ export default {
       await writeContinueConfig(continueDirectory(), { models, apiBase: url, apiKey })
       if (!models.length) return 'The API key has no models available.'
     }
+    const toolsDirectory = () => resolve(root(), '..', 'plugin-studio', 'openvscode-server')
+    const installer = new Installer(toolsDirectory())
+    /** Settings first, then a server Plugin Studio downloaded, then one on PATH. */
+    const command = async () => {
+      const configured = String(api.config.vscodeCommand || '').trim()
+      if (!configured && await installer.installed()) return installedCommand(installer.directory)
+      return findCommand(configured)
+    }
     api.registerProxy('vscode', () => vscode.upstream())
     const withUrl = (status, event) => {
       if (!status.running) return status
@@ -106,7 +127,7 @@ export default {
       apiKey: (await describeKey()) || null
     }))
 
-    api.registerRoute('POST', 'projects', async event => {
+    api.registerRoute('POST', 'projects', answered(async event => {
       const { id, name, template = 'hook' } = await readJson(event)
       validateProjectId(id)
       if (!Object.hasOwn(TEMPLATES, template)) throw new WorkspaceError('Unknown template')
@@ -114,23 +135,28 @@ export default {
       // Editor completion for `@typedef {import('./llmhub-plugin')}`, when the source tree is present.
       await copyFile(join(process.cwd(), 'examples/plugins/llmhub-plugin.d.ts'), join(root(), id, 'llmhub-plugin.d.ts')).catch(() => {})
       return { project: await workspace().describe(id) }
-    })
+    }))
 
     api.registerRoute('GET', 'vscode', async event => ({
       ...withUrl(vscode.status(), event),
-      command: await findCommand(String(api.config.vscodeCommand || '').trim())
+      command: await command(),
+      install: installer.status()
     }))
-    api.registerRoute('POST', 'vscode/start', async event => {
+    api.registerRoute('POST', 'vscode/install', answered(async () => {
+      try { return { install: installer.start() } }
+      catch (error) { throw new WorkspaceError(error.message) }
+    }))
+    api.registerRoute('POST', 'vscode/start', answered(async event => {
       const { project } = await readJson(event)
-      const command = await findCommand(String(api.config.vscodeCommand || '').trim())
-      if (!command) throw new WorkspaceError('No VS Code server found. Install openvscode-server or code-server, or set its path in Plugin Studio settings.')
+      const server = await command()
+      if (!server) throw new WorkspaceError('No VS Code server yet. Download OpenVSCode Server below, or install one and set its path in Plugin Studio settings.')
       const folder = project ? workspace().directory(project) : root()
       const current = vscode.status()
       if (current.running && current.folder !== folder) vscode.stop()
       const apiKey = await currentKey()
       const assistant = api.config.assistant !== false
       return vscode.start({
-        command, folder,
+        command: server, folder,
         host: String(api.config.vscodeHost || '127.0.0.1'),
         port: Math.floor(Number(api.config.vscodePort) || 3100),
         basePath: PROXY_PATH,
@@ -141,10 +167,10 @@ export default {
           return configureContinue(apiKey)
         } : undefined
       })
-    })
+    }))
     api.registerRoute('POST', 'vscode/stop', () => vscode.stop())
 
-    api.registerRoute('POST', 'api-key', async event => {
+    api.registerRoute('POST', 'api-key', answered(async event => {
       if (api.config.apiKey) throw new WorkspaceError('An API key is already set in Plugin Studio settings')
       const key = await createApiKey(hubOrigin(), sessionCookie(event), 'Plugin Studio (Continue)')
       await api.storage.setItem('api-key', key)
@@ -152,7 +178,7 @@ export default {
       let warning
       if (vscode.status().running && api.config.assistant !== false) warning = await configureContinue(key.key).catch(error => error.message)
       return { apiKey: await describeKey(), warning }
-    })
+    }))
 
     return () => { vscode.stop() }
   }

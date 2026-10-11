@@ -69,6 +69,7 @@
     <div class="bar"><strong>VS Code</strong><button id="stop" type="button" hidden>Stop</button></div>
     <div class="status">
       <p id="summary" class="muted">Checking…</p>
+      <div class="key"><button id="install" class="primary" type="button" hidden></button><span id="install-status" class="muted" hidden></span></div>
       <div class="key"><span id="key-status" class="muted"></span><button id="create-key" type="button" hidden>Create an API key for Continue</button></div>
       <div class="url" id="url-row" hidden>
         <input id="url" class="mono" readonly>
@@ -107,6 +108,13 @@
       if (text !== undefined) node.textContent = text
       return node
     }
+    // Plugin Studio answers expected failures as { error }, because the dashboard hides thrown ones.
+    async function call(path, options) {
+      const result = await llmhub.fetch(path, options)
+      if (result && typeof result === 'object' && typeof result.error === 'string' && result.error && !('running' in result)) throw new Error(result.error)
+      return result
+    }
+    let canOpen = false
     const show = (id, text) => { $(id).hidden = !text; $(id).textContent = text || '' }
 
     function renderProjects(projects, workspace) {
@@ -123,15 +131,16 @@
         const text = element('div')
         text.append(element('span', '', project.name), element('small', 'mono', `${project.id}${project.version ? ` · ${project.version}` : ''}`))
         if (project.description) text.append(element('small', '', project.description))
-        const button = element('button', '', 'Open in VS Code')
+        const button = element('button', 'open-project', 'Open in VS Code')
         button.type = 'button'
+        button.disabled = !canOpen
         button.addEventListener('click', () => start(project.id))
         row.append(text, button)
         list.append(row)
       }
     }
     async function load() {
-      const overview = await llmhub.fetch('overview')
+      const overview = await call('overview')
       templates = overview.templates
       renderProjects(overview.projects, overview.workspace)
       renderKey(overview.apiKey)
@@ -148,7 +157,7 @@
     $('create-key').addEventListener('click', async event => {
       event.target.disabled = true
       try {
-        const result = await llmhub.fetch('api-key', { method: 'POST', body: {} })
+        const result = await call('api-key', { method: 'POST', body: {} })
         renderKey(result.apiKey)
         if (result.warning) show('warning', result.warning)
       } catch (error) { show('error', error.message) }
@@ -156,12 +165,35 @@
     })
 
     const PHASES = { preparing: 'Writing the Continue configuration…', installing: 'Installing the Continue extension (first time only)…', starting: 'Starting VS Code…' }
+    const megabytes = bytes => (bytes / 1048576).toFixed(0)
+    function renderInstall(status) {
+      const install = status.install || {}
+      const offer = !status.command && !status.running && install.available && !install.phase
+      $('install').hidden = !offer
+      $('install').textContent = `Download OpenVSCode Server ${install.version || ''} (about 70 MB)`
+      const progress = install.phase === 'downloading'
+        ? `Downloading OpenVSCode Server… ${megabytes(install.received)}${install.total ? ` / ${megabytes(install.total)}` : ''} MB`
+        : install.phase === 'extracting' ? 'Unpacking OpenVSCode Server…' : ''
+      show('install-status', progress)
+      if (install.error) show('error', install.error)
+    }
+    $('install').addEventListener('click', async () => {
+      $('install').disabled = true
+      show('error', '')
+      try { await call('vscode/install', { method: 'POST', body: {} }); refresh() }
+      catch (error) { show('error', error.message) }
+      finally { $('install').disabled = false }
+    })
     function renderStatus(status) {
+      // A running editor can be reopened on another plugin; only starting blocks it.
+      canOpen = Boolean(status.command) && (!status.phase || status.running)
+      for (const button of document.querySelectorAll('.open-project')) button.disabled = !canOpen
+      renderInstall(status)
       $('stop').hidden = !status.running
       $('url-row').hidden = !status.running
       show('password', status.password ? `Password: ${status.password}` : '')
       if (status.warning) show('warning', status.warning)
-      show('error', status.error)
+      if (!status.install?.error) show('error', status.error)
       $('log').hidden = !(status.error && status.output)
       $('log').textContent = status.output || ''
       if (status.running) {
@@ -173,18 +205,20 @@
       } else {
         $('summary').textContent = status.command
           ? `Ready: ${status.command}. Choose a plugin to open.`
-          : 'No VS Code server was found. Install openvscode-server or code-server on the gateway machine, or set its path in Plugin Studio settings.'
+          : status.install?.available
+            ? 'No VS Code server yet. Download OpenVSCode Server below, or install one yourself and set its path in Plugin Studio settings.'
+            : 'No VS Code server was found. Install openvscode-server or code-server on the gateway machine and set its path in Plugin Studio settings.'
       }
       clearTimeout(polling)
-      if (status.phase && !status.running) polling = setTimeout(refresh, 1500)
+      if ((status.phase && !status.running) || status.install?.phase) polling = setTimeout(refresh, 1500)
     }
-    const refresh = () => llmhub.fetch('vscode').then(renderStatus).catch(error => show('error', error.message))
+    const refresh = () => call('vscode').then(renderStatus).catch(error => show('error', error.message))
     async function start(project) {
       show('error', '')
-      try { await llmhub.fetch('vscode/start', { method: 'POST', body: { project } }); refresh() }
+      try { await call('vscode/start', { method: 'POST', body: { project } }); refresh() }
       catch (error) { show('error', error.message) }
     }
-    $('stop').addEventListener('click', () => llmhub.fetch('vscode/stop', { method: 'POST', body: {} }).then(refresh))
+    $('stop').addEventListener('click', () => call('vscode/stop', { method: 'POST', body: {} }).then(refresh))
     $('copy').addEventListener('click', async () => {
       try { await navigator.clipboard.writeText($('url').value) }
       catch { $('url').select(); document.execCommand('copy') }
@@ -212,7 +246,7 @@
     async function create() {
       $('create-submit').disabled = true
       try {
-        await llmhub.fetch('projects', { method: 'POST', body: {
+        await call('projects', { method: 'POST', body: {
           id: $('create-id').value.trim(), name: $('create-name').value.trim(),
           template: document.querySelector('input[name="template"]:checked')?.value
         } })

@@ -8,11 +8,12 @@ import { join } from 'node:path'
 import { Readable } from 'node:stream'
 import test from 'node:test'
 import { parse } from 'yaml'
-import plugin, { createApiKey, dashboardOrigin, gatewayUrl, hubOrigin, listModels, PROXY_PATH } from '../index.mjs'
+import plugin, { answered, createApiKey, dashboardOrigin, gatewayUrl, hubOrigin, listModels, PROXY_PATH } from '../index.mjs'
 import { continueConfig, GUIDE } from '../lib/continue.mjs'
 import { TEMPLATES } from '../lib/templates.mjs'
 import { findCommand, flavorOf, VSCodeServer } from '../lib/vscode.mjs'
-import { Workspace } from '../lib/workspace.mjs'
+import { Workspace, WorkspaceError } from '../lib/workspace.mjs'
+import { Installer, installedCommand, openvscodeDownload } from '../lib/install.mjs'
 
 const temporary = async t => {
   const directory = await mkdtemp(join(tmpdir(), 'plugin-studio-'))
@@ -188,11 +189,11 @@ test('routes list and create plugins and start VS Code with Continue pointed at 
   const cleanup = await plugin.setup(api)
 
   await call('POST projects', { id: 'demo', name: 'Demo', template: 'panel' })
-  await assert.rejects(call('POST projects', { id: 'other', template: 'nope' }), /Unknown template/)
+  assert.match((await call('POST projects', { id: 'other', template: 'nope' })).error, /Unknown template/)
   const overview = await call('GET overview')
   assert.deepEqual(overview.projects.map(project => project.name), ['Demo'])
   assert.deepEqual(overview.apiKey, { source: 'settings' })
-  await assert.rejects(call('POST api-key', {}), /already set in Plugin Studio settings/)
+  assert.match((await call('POST api-key', {})).error, /already set in Plugin Studio settings/)
 
   await call('POST vscode/start', { project: 'demo' })
   await wait(async () => (await call('GET vscode')).running, 'VS Code starts')
@@ -205,7 +206,7 @@ test('routes list and create plugins and start VS Code with Continue pointed at 
   const config = parse(await readFile(join(directory, 'config.yaml'), 'utf8'))
   assert.deepEqual(config.models.map(model => model.model), ['b/model', 'a/model'])
   assert.equal(config.models[0].apiBase, gateway.url)
-  await assert.rejects(call('POST vscode/start', { project: '../x' }), /plugin ID/)
+  assert.match((await call('POST vscode/start', { project: '../x' })).error, /plugin ID/)
   await cleanup()
   assert.equal((await call('GET vscode')).running, false)
   assert.equal(proxies.get('vscode')(), null)
@@ -233,7 +234,7 @@ test('a key created from the Studio page is used when settings have none', async
   t.after(cleanup)
 
   assert.equal((await call('GET overview')).apiKey, null)
-  await assert.rejects(call('POST api-key', {}, { host: 'hub' }), /Sign in/)
+  assert.match((await call('POST api-key', {}, { host: 'hub' })).error, /Sign in/)
   const { apiKey } = await call('POST api-key', {})
   assert.deepEqual(apiKey, { source: 'created', name: 'Plugin Studio (Continue)', createdAt: '2026-10-11T00:00:00.000Z' })
   assert.equal(stored.get('api-key').key, 'sk-created')
@@ -253,4 +254,49 @@ test('the editor link uses the address the browser used for the dashboard', () =
   assert.equal(dashboardOrigin(at({ host: 'hub' }, true)), 'https://hub')
   assert.equal(dashboardOrigin(at({ host: 'internal', 'x-forwarded-host': 'hub.example.com', 'x-forwarded-proto': 'https' })), 'https://hub.example.com')
   assert.equal(dashboardOrigin(at({ host: 'evil.example/"><script>' })), '')
+})
+
+test('OpenVSCode Server is downloaded and unpacked in the background, with progress', async t => {
+  assert.match(openvscodeDownload('linux', 'x64'), /openvscode-server-v[\d.]+-linux-x64\.tar\.gz$/)
+  assert.match(openvscodeDownload('linux', 'arm64'), /linux-arm64/)
+  assert.equal(openvscodeDownload('darwin', 'arm64'), null, 'upstream publishes Linux builds only')
+
+  // A release-shaped archive: one top folder holding bin/openvscode-server.
+  const source = await temporary(t)
+  await mkdir(join(source, 'openvscode-server-v0-linux-x64/bin'), { recursive: true })
+  await writeFile(join(source, 'openvscode-server-v0-linux-x64/bin/openvscode-server'), '#!/bin/sh\n')
+  await chmod(join(source, 'openvscode-server-v0-linux-x64/bin/openvscode-server'), 0o755)
+  execFileSync('tar', ['-czf', join(source, 'release.tar.gz'), '-C', source, 'openvscode-server-v0-linux-x64'])
+  const archive = await readFile(join(source, 'release.tar.gz'))
+  const server = createServer((request, response) => {
+    if (request.url !== '/release.tar.gz') { response.statusCode = 404; return response.end() }
+    response.setHeader('content-length', archive.length)
+    response.end(archive)
+  })
+  await new Promise(resolve => server.listen(0, '127.0.0.1', resolve))
+  t.after(() => new Promise(resolve => server.close(resolve)))
+  const base = `http://127.0.0.1:${server.address().port}`
+
+  const target = join(await temporary(t), 'tools', 'openvscode-server')
+  const installer = new Installer(target, `${base}/release.tar.gz`)
+  assert.equal(await installer.installed(), false)
+  installer.start()
+  await wait(() => !installer.status().phase, 'finishes')
+  assert.equal(installer.status().error, '')
+  assert.equal(installer.status().received, archive.length)
+  assert.equal(await installer.installed(), true)
+  assert.equal(installedCommand(target), join(target, 'bin/openvscode-server'))
+
+  const failing = new Installer(join(await temporary(t), 'server'), `${base}/missing.tar.gz`)
+  failing.start()
+  await wait(() => !failing.status().phase, 'fails')
+  assert.match(failing.status().error, /download failed \(404\)/)
+  assert.equal(await failing.installed(), false, 'nothing half-installed is left behind')
+  assert.throws(() => new Installer('/x', null).start(), /no download for this system/)
+})
+
+test('expected failures reach the panel as messages', async () => {
+  assert.deepEqual(await answered(async () => { throw new WorkspaceError('No VS Code server yet') })({}), { error: 'No VS Code server yet' })
+  await assert.rejects(answered(async () => { throw new TypeError('bug') })({}), /bug/, 'unexpected failures still fail')
+  assert.deepEqual(await answered(async () => ({ ok: true }))({}), { ok: true })
 })

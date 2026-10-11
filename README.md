@@ -24,8 +24,9 @@ from GitHub as `huangdihd/llmhub-plugin-studio`. Requires LLMHub with plugin API
 
 ## Setup
 
-1. Install a VS Code server on the gateway machine, for example OpenVSCode Server, and put
-   `openvscode-server` on `PATH` (or set its path in the settings).
+1. On the **Studio** page click **Download OpenVSCode Server** (Linux, about 70 MB from GitHub).
+   It is unpacked into `.data/plugin-studio/openvscode-server/`. Or install OpenVSCode Server or
+   code-server yourself and put it on `PATH`, or set its path in the settings.
 2. On the **Studio** page click **Create an API key for Continue**. It creates an ordinary key
    named “Plugin Studio (Continue)” as you; limit its models under **API Keys**. Or enter an
    existing key in Plugin Studio's settings, which takes precedence.
