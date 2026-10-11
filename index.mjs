@@ -10,7 +10,6 @@ export const PLUGIN_ID = 'plugin-studio'
 /** LLMHub serves plugin proxies here, behind the dashboard login (plugin API 1.6). */
 export const PROXY_PATH = `/api/hub/plugins/${PLUGIN_ID}/proxy/vscode`
 const MAX_BODY_BYTES = 64 * 1024
-const MAX_MODELS = 50
 
 async function readJson(event) {
   const chunks = []
@@ -73,7 +72,7 @@ export async function listModels(url, apiKey, preferred = '') {
   if (!response.ok) throw new Error(`Could not list models with the configured API key (${response.status})`)
   const ids = ((await response.json()).data || []).map(model => String(model.id)).sort()
   if (preferred) ids.splice(0, ids.length, preferred, ...ids.filter(id => id !== preferred))
-  return ids.slice(0, MAX_MODELS)
+  return ids
 }
 
 /**

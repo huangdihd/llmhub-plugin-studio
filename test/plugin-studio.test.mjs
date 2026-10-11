@@ -102,6 +102,11 @@ test('Continue is configured with every model of the API key and the authoring g
 
   const gateway = await fakeGateway(t)
   assert.deepEqual(await listModels(gateway.url, 'sk-1', 'b/model'), ['b/model', 'a/model'])
+  // Every model the key can use reaches Continue; nothing is cut off.
+  const many = Array.from({ length: 120 }, (_, index) => ({ id: `p/model-${String(index).padStart(3, '0')}` }))
+  t.mock.method(globalThis, 'fetch', async () => new Response(JSON.stringify({ data: many })))
+  assert.equal((await listModels('http://gateway/api/openai', 'sk-1')).length, 120)
+  t.mock.restoreAll()
   assert.equal(gateway.requests[0].authorization, 'Bearer sk-1')
   assert.equal(gatewayUrl({}, { PORT: '8080' }), 'http://127.0.0.1:8080/api/openai')
   assert.equal(gatewayUrl({ gatewayUrl: 'http://gw/api/openai/' }), 'http://gw/api/openai')
