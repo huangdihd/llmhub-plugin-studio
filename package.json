@@ -1,6 +1,6 @@
 {
   "name": "llmhub-plugin-studio",
-  "version": "1.3.0",
+  "version": "1.4.0",
   "description": "Write LLMHub plugins in VS Code, with the Continue agent using this gateway's models.",
   "type": "module",
   "main": "index.mjs",
@@ -75,7 +75,7 @@
       },
       {
         "key": "hideBuiltinChat",
-        "label": "Close VS Code's built-in Copilot chat (Continue is the assistant)",
+        "label": "Open Continue in the right side bar in place of VS Code's built-in Copilot chat",
         "type": "boolean",
         "default": true
       },
