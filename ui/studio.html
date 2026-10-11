@@ -41,6 +41,7 @@
     .muted { color: var(--muted); }
     .bad { color: var(--bad); } .warn { color: var(--warn); }
     .url { display: flex; gap: 6px; }
+    .key { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
     .url input { flex: 1; }
     .log { font: 11px/1.4 ui-monospace, monospace; max-height: 140px; overflow: auto; background: var(--code); border: 1px solid var(--line); border-radius: 6px; padding: 6px; white-space: pre-wrap; margin: 0; }
     dialog { border: 1px solid var(--line); border-radius: 8px; background: var(--card); color: var(--text); padding: 0; width: min(520px, 92vw); }
@@ -68,6 +69,7 @@
     <div class="bar"><strong>VS Code</strong><button id="stop" type="button" hidden>Stop</button></div>
     <div class="status">
       <p id="summary" class="muted">Checking…</p>
+      <div class="key"><span id="key-status" class="muted"></span><button id="create-key" type="button" hidden>Create an API key for Continue</button></div>
       <div class="url" id="url-row" hidden>
         <input id="url" class="mono" readonly>
         <button id="copy" type="button">Copy</button>
@@ -132,8 +134,26 @@
       const overview = await llmhub.fetch('overview')
       templates = overview.templates
       renderProjects(overview.projects, overview.workspace)
-      if (!overview.apiKey) show('warning', 'Set an LLMHub API key in Plugin Studio settings so the Continue agent can use this gateway\'s models.')
+      renderKey(overview.apiKey)
     }
+
+    function renderKey(key) {
+      $('create-key').hidden = Boolean(key)
+      $('key-status').textContent = !key
+        ? 'Continue needs an LLMHub API key to use this gateway\'s models.'
+        : key.source === 'settings'
+          ? 'Continue uses the API key from Plugin Studio settings.'
+          : `Continue uses the key “${key.name}”, created ${new Date(key.createdAt).toLocaleDateString()}. Limit its models under API Keys.`
+    }
+    $('create-key').addEventListener('click', async event => {
+      event.target.disabled = true
+      try {
+        const result = await llmhub.fetch('api-key', { method: 'POST', body: {} })
+        renderKey(result.apiKey)
+        if (result.warning) show('warning', result.warning)
+      } catch (error) { show('error', error.message) }
+      finally { event.target.disabled = false }
+    })
 
     const PHASES = { preparing: 'Writing the Continue configuration…', installing: 'Installing the Continue extension (first time only)…', starting: 'Starting VS Code…' }
     function renderStatus(status) {

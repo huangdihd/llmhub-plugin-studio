@@ -26,7 +26,9 @@ from GitHub as `huangdihd/llmhub-plugin-studio`. Requires LLMHub with plugin API
 
 1. Install a VS Code server on the gateway machine, for example OpenVSCode Server, and put
    `openvscode-server` on `PATH` (or set its path in the settings).
-2. Create an LLMHub API key for the agent and enter it in Plugin Studio's settings.
+2. On the **Studio** page click **Create an API key for Continue**. It creates an ordinary key
+   named “Plugin Studio (Continue)” as you; limit its models under **API Keys**. Or enter an
+   existing key in Plugin Studio's settings, which takes precedence.
 3. Open **Studio**, pick a plugin and click **Open in VS Code**. The first start installs Continue,
    which needs access to `open-vsx.org`. Open the printed link (same address as the dashboard,
    under `/api/hub/plugins/plugin-studio/proxy/vscode/`); Continue is in the sidebar.
@@ -41,7 +43,7 @@ still written for it.
 
 | Setting | Default | Meaning |
 | --- | --- | --- |
-| API key | empty | The LLMHub API key Continue uses. Its requests count against this key |
+| API key | empty | The LLMHub API key Continue uses, instead of one created from the Studio page. Its requests count against this key |
 | Model listed first | empty | `provider/model` shown first in Continue |
 | Install and configure Continue | on | Turn off to use VS Code alone or another agent |
 | Base URL | this gateway | OpenAI-compatible base URL written into Continue's configuration |

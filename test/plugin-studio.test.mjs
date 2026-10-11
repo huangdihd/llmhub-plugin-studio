@@ -8,7 +8,7 @@ import { join } from 'node:path'
 import { Readable } from 'node:stream'
 import test from 'node:test'
 import { parse } from 'yaml'
-import plugin, { dashboardOrigin, gatewayUrl, listModels, PROXY_PATH } from '../index.mjs'
+import plugin, { createApiKey, dashboardOrigin, gatewayUrl, hubOrigin, listModels, PROXY_PATH } from '../index.mjs'
 import { continueConfig, GUIDE } from '../lib/continue.mjs'
 import { TEMPLATES } from '../lib/templates.mjs'
 import { findCommand, flavorOf, VSCodeServer } from '../lib/vscode.mjs'
@@ -19,7 +19,7 @@ const temporary = async t => {
   t.after(() => rm(directory, { recursive: true, force: true }))
   return directory
 }
-const event = (body, headers = { host: 'hub.example:3000' }) => {
+const event = (body, headers = { host: 'hub.example:3000', cookie: 'llmhub_session=admin' }) => {
   const req = Readable.from(body === undefined ? [] : [Buffer.from(JSON.stringify(body))])
   req.headers = headers
   return { node: { req } }
@@ -31,14 +31,22 @@ const wait = async (condition, message) => {
 
 async function fakeGateway(t) {
   const requests = []
-  const server = createServer((request, response) => {
-    requests.push({ url: request.url, authorization: request.headers.authorization })
+  const server = createServer(async (request, response) => {
+    const chunks = []
+    for await (const chunk of request) chunks.push(chunk)
+    requests.push({ url: request.url, authorization: request.headers.authorization, cookie: request.headers.cookie, body: Buffer.concat(chunks).toString() })
     response.setHeader('content-type', 'application/json')
+    if (request.url === '/api/hub/keys') {
+      if (request.headers.cookie !== 'llmhub_session=admin') { response.statusCode = 401; return response.end('{}') }
+      const { name } = JSON.parse(Buffer.concat(chunks).toString())
+      return response.end(JSON.stringify({ key: { id: 'k1', name, created_at: '2026-10-11T00:00:00.000Z', plain_key: 'sk-created' } }))
+    }
     response.end(JSON.stringify({ data: [{ id: 'b/model' }, { id: 'a/model' }] }))
   })
   await new Promise(resolve => server.listen(0, '127.0.0.1', resolve))
   t.after(() => new Promise(resolve => server.close(resolve)))
-  return { url: `http://127.0.0.1:${server.address().port}/api/openai`, requests }
+  const origin = `http://127.0.0.1:${server.address().port}`
+  return { origin, port: String(server.address().port), url: `${origin}/api/openai`, requests }
 }
 
 /** Behaves like the real launchers: handles extension commands, else starts the actual server as a child. */
@@ -96,6 +104,15 @@ test('Continue is configured with every model of the API key and the authoring g
   assert.equal(gateway.requests[0].authorization, 'Bearer sk-1')
   assert.equal(gatewayUrl({}, { PORT: '8080' }), 'http://127.0.0.1:8080/api/openai')
   assert.equal(gatewayUrl({ gatewayUrl: 'http://gw/api/openai/' }), 'http://gw/api/openai')
+  assert.equal(hubOrigin({ HOST: '0.0.0.0', PORT: '3000' }), 'http://127.0.0.1:3000')
+  assert.equal(hubOrigin({ HOST: '10.0.0.2', PORT: '3000' }), 'http://10.0.0.2:3000', 'a gateway bound to one address is reached there')
+})
+
+test('an API key is created as the signed-in administrator, without keeping the session', async t => {
+  const gateway = await fakeGateway(t)
+  assert.deepEqual(await createApiKey(gateway.origin, 'admin', 'Plugin Studio (Continue)'), { id: 'k1', name: 'Plugin Studio (Continue)', key: 'sk-created', createdAt: '2026-10-11T00:00:00.000Z' })
+  await assert.rejects(createApiKey(gateway.origin, 'expired', 'x'), /\(401\)/)
+  await assert.rejects(createApiKey(gateway.origin, '', 'x'), /Sign in/)
 })
 
 test('a VS Code server is found, gets Continue, starts on the plugin folder and stops completely', async t => {
@@ -159,7 +176,9 @@ test('routes list and create plugins and start VS Code with Continue pointed at 
   const launcher = await fakeLauncher(bin)
   const routes = new Map()
   const proxies = new Map()
+  const stored = new Map()
   const api = {
+    storage: { getItem: async key => stored.get(key) ?? null, setItem: async (key, value) => { stored.set(key, value) }, removeItem: async key => { stored.delete(key) } },
     registerProxy: (id, target) => proxies.set(id, target),
     config: { workspace: join(root, 'plugins'), apiKey: 'sk-1', model: 'b/model', gatewayUrl: gateway.url, vscodeCommand: launcher, vscodePort: 3998 },
     registerRoute: (method, path, handler) => routes.set(`${method} ${path}`, handler),
@@ -172,7 +191,8 @@ test('routes list and create plugins and start VS Code with Continue pointed at 
   await assert.rejects(call('POST projects', { id: 'other', template: 'nope' }), /Unknown template/)
   const overview = await call('GET overview')
   assert.deepEqual(overview.projects.map(project => project.name), ['Demo'])
-  assert.equal(overview.apiKey, true)
+  assert.deepEqual(overview.apiKey, { source: 'settings' })
+  await assert.rejects(call('POST api-key', {}), /already set in Plugin Studio settings/)
 
   await call('POST vscode/start', { project: 'demo' })
   await wait(async () => (await call('GET vscode')).running, 'VS Code starts')
@@ -189,6 +209,42 @@ test('routes list and create plugins and start VS Code with Continue pointed at 
   await cleanup()
   assert.equal((await call('GET vscode')).running, false)
   assert.equal(proxies.get('vscode')(), null)
+})
+
+test('a key created from the Studio page is used when settings have none', async t => {
+  const root = await temporary(t)
+  const bin = await temporary(t)
+  const gateway = await fakeGateway(t)
+  const launcher = await fakeLauncher(bin)
+  const routes = new Map()
+  const stored = new Map()
+  const previousPort = process.env.PORT
+  process.env.PORT = gateway.port
+  t.after(() => { if (previousPort === undefined) delete process.env.PORT; else process.env.PORT = previousPort })
+  const api = {
+    config: { workspace: join(root, 'plugins'), vscodeCommand: launcher, vscodePort: 3997 },
+    registerRoute: (method, path, handler) => routes.set(`${method} ${path}`, handler),
+    registerProxy() {},
+    storage: { getItem: async key => stored.get(key) ?? null, setItem: async (key, value) => { stored.set(key, value) }, removeItem: async key => { stored.delete(key) } },
+    logger: { info() {}, warn() {}, error() {} }
+  }
+  const call = (route, body, headers) => routes.get(route)(event(body, headers))
+  const cleanup = await plugin.setup(api)
+  t.after(cleanup)
+
+  assert.equal((await call('GET overview')).apiKey, null)
+  await assert.rejects(call('POST api-key', {}, { host: 'hub' }), /Sign in/)
+  const { apiKey } = await call('POST api-key', {})
+  assert.deepEqual(apiKey, { source: 'created', name: 'Plugin Studio (Continue)', createdAt: '2026-10-11T00:00:00.000Z' })
+  assert.equal(stored.get('api-key').key, 'sk-created')
+  assert.equal(gateway.requests.find(request => request.url === '/api/hub/keys').cookie, 'llmhub_session=admin')
+
+  await call('POST projects', { id: 'demo', template: 'empty' })
+  await call('POST vscode/start', { project: 'demo' })
+  await wait(async () => (await call('GET vscode')).running, 'VS Code starts')
+  const config = parse(await readFile(join(root, 'plugin-studio/continue/config.yaml'), 'utf8'))
+  assert.equal(config.models[0].apiKey, 'sk-created')
+  assert.equal(gateway.requests.at(-1).authorization, 'Bearer sk-created')
 })
 
 test('the editor link uses the address the browser used for the dashboard', () => {

@@ -35,8 +35,35 @@ export function dashboardOrigin(event) {
   return /^https?$/.test(protocol) && /^[a-zA-Z0-9.:[\]-]+$/.test(host) ? `${protocol}://${host}` : ''
 }
 
+/** This gateway, reached from inside its own process. */
+export function hubOrigin(env = process.env) {
+  const host = env.HOST && !['0.0.0.0', '::'].includes(env.HOST) ? env.HOST : '127.0.0.1'
+  return `http://${host.includes(':') ? `[${host}]` : host}:${env.PORT || env.NITRO_PORT || 3000}`
+}
+
 export function gatewayUrl(config, env = process.env) {
-  return String(config.gatewayUrl || '').trim().replace(/\/+$/, '') || `http://127.0.0.1:${env.PORT || env.NITRO_PORT || 3000}/api/openai`
+  return String(config.gatewayUrl || '').trim().replace(/\/+$/, '') || `${hubOrigin(env)}/api/openai`
+}
+
+export function sessionCookie(event) {
+  return /(?:^|;\s*)llmhub_session=([^;]+)/.exec(event.node.req.headers.cookie || '')?.[1] || ''
+}
+
+/**
+ * Creates an ordinary LLMHub API key as the administrator who asked, through the gateway's own
+ * management API. The session is used for this one request and never stored.
+ */
+export async function createApiKey(origin, session, name) {
+  if (!session) throw new WorkspaceError('Sign in to the dashboard to create a key')
+  const response = await fetch(`${origin}/api/hub/keys`, {
+    method: 'POST', signal: AbortSignal.timeout(4000),
+    headers: { 'content-type': 'application/json', cookie: `llmhub_session=${session}` },
+    body: JSON.stringify({ name })
+  })
+  if (!response.ok) throw new WorkspaceError(`Could not create an API key (${response.status})`)
+  const { key } = await response.json()
+  if (!key?.plain_key) throw new WorkspaceError('The gateway returned no key')
+  return { id: String(key.id), name: String(key.name), key: String(key.plain_key), createdAt: String(key.created_at || new Date().toISOString()) }
 }
 
 /** The models this API key may use, with the configured one first. */
@@ -55,6 +82,16 @@ export default {
     // Outside the plugin folder, so the gateway never scans it as a plugin.
     const continueDirectory = () => resolve(root(), '..', 'plugin-studio', 'continue')
     const vscode = new VSCodeServer(api.logger)
+    /** A key set in settings wins over one created from the Studio page. */
+    const created = async () => (await api.storage.getItem('api-key')) || null
+    const currentKey = async () => String(api.config.apiKey || '') || (await created())?.key || ''
+    const describeKey = async () => api.config.apiKey ? { source: 'settings' } : (key => key && { source: 'created', name: key.name, createdAt: key.createdAt })(await created())
+    const configureContinue = async apiKey => {
+      const url = gatewayUrl(api.config)
+      const models = await listModels(url, apiKey, String(api.config.model || '').trim())
+      await writeContinueConfig(continueDirectory(), { models, apiBase: url, apiKey })
+      if (!models.length) return 'The API key has no models available.'
+    }
     api.registerProxy('vscode', () => vscode.upstream())
     const withUrl = (status, event) => {
       if (!status.running) return status
@@ -66,7 +103,7 @@ export default {
       workspace: root(),
       projects: await workspace().projects(),
       templates: Object.entries(TEMPLATES).map(([id, template]) => ({ id, label: template.label, description: template.description })),
-      apiKey: Boolean(api.config.apiKey)
+      apiKey: (await describeKey()) || null
     }))
 
     api.registerRoute('POST', 'projects', async event => {
@@ -90,7 +127,7 @@ export default {
       const folder = project ? workspace().directory(project) : root()
       const current = vscode.status()
       if (current.running && current.folder !== folder) vscode.stop()
-      const apiKey = String(api.config.apiKey || '')
+      const apiKey = await currentKey()
       const assistant = api.config.assistant !== false
       return vscode.start({
         command, folder,
@@ -100,15 +137,22 @@ export default {
         extension: assistant ? CONTINUE_EXTENSION : undefined,
         env: assistant ? { CONTINUE_GLOBAL_DIR: continueDirectory() } : {},
         prepare: assistant ? async () => {
-          if (!apiKey) return 'Set an LLMHub API key in Plugin Studio settings so Continue can use this gateway\'s models.'
-          const url = gatewayUrl(api.config)
-          const models = await listModels(url, apiKey, String(api.config.model || '').trim())
-          await writeContinueConfig(continueDirectory(), { models, apiBase: url, apiKey })
-          if (!models.length) return 'The API key has no models available.'
+          if (!apiKey) return 'Create an API key on the Studio page, or set one in Plugin Studio settings, so Continue can use this gateway\'s models.'
+          return configureContinue(apiKey)
         } : undefined
       })
     })
     api.registerRoute('POST', 'vscode/stop', () => vscode.stop())
+
+    api.registerRoute('POST', 'api-key', async event => {
+      if (api.config.apiKey) throw new WorkspaceError('An API key is already set in Plugin Studio settings')
+      const key = await createApiKey(hubOrigin(), sessionCookie(event), 'Plugin Studio (Continue)')
+      await api.storage.setItem('api-key', key)
+      // Continue reloads its configuration file, so a running editor picks up the key right away.
+      let warning
+      if (vscode.status().running && api.config.assistant !== false) warning = await configureContinue(key.key).catch(error => error.message)
+      return { apiKey: await describeKey(), warning }
+    })
 
     return () => { vscode.stop() }
   }
