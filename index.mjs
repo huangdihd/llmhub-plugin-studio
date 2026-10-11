@@ -6,6 +6,8 @@ import { findCommand, VSCodeServer } from './lib/vscode.mjs'
 import { validateProjectId, Workspace, WorkspaceError } from './lib/workspace.mjs'
 
 export const PLUGIN_ID = 'plugin-studio'
+/** LLMHub serves plugin proxies here, behind the dashboard login (plugin API 1.6). */
+export const PROXY_PATH = `/api/hub/plugins/${PLUGIN_ID}/proxy/vscode`
 const MAX_BODY_BYTES = 64 * 1024
 const MAX_MODELS = 50
 
@@ -22,6 +24,15 @@ async function readJson(event) {
   catch { throw new WorkspaceError('Request body is not JSON') }
   if (!body || typeof body !== 'object' || Array.isArray(body)) throw new WorkspaceError('Expected a JSON object')
   return body
+}
+
+/** The address the browser used for the dashboard, which the proxied editor shares. */
+export function dashboardOrigin(event) {
+  const headers = event.node.req.headers
+  const first = value => String(Array.isArray(value) ? value[0] : value || '').split(',')[0].trim()
+  const protocol = first(headers['x-forwarded-proto']) || (event.node.req.socket?.encrypted ? 'https' : 'http')
+  const host = first(headers['x-forwarded-host']) || first(headers.host)
+  return /^https?$/.test(protocol) && /^[a-zA-Z0-9.:[\]-]+$/.test(host) ? `${protocol}://${host}` : ''
 }
 
 export function gatewayUrl(config, env = process.env) {
@@ -44,6 +55,12 @@ export default {
     // Outside the plugin folder, so the gateway never scans it as a plugin.
     const continueDirectory = () => resolve(root(), '..', 'plugin-studio', 'continue')
     const vscode = new VSCodeServer(api.logger)
+    api.registerProxy('vscode', () => vscode.upstream())
+    const withUrl = (status, event) => {
+      if (!status.running) return status
+      const origin = dashboardOrigin(event)
+      return { ...status, url: origin ? `${origin}${status.path}` : status.path }
+    }
 
     api.registerRoute('GET', 'overview', async () => ({
       workspace: root(),
@@ -62,8 +79,8 @@ export default {
       return { project: await workspace().describe(id) }
     })
 
-    api.registerRoute('GET', 'vscode', async () => ({
-      ...vscode.status(),
+    api.registerRoute('GET', 'vscode', async event => ({
+      ...withUrl(vscode.status(), event),
       command: await findCommand(String(api.config.vscodeCommand || '').trim())
     }))
     api.registerRoute('POST', 'vscode/start', async event => {
@@ -79,7 +96,7 @@ export default {
         command, folder,
         host: String(api.config.vscodeHost || '127.0.0.1'),
         port: Math.floor(Number(api.config.vscodePort) || 3100),
-        publicUrl: String(api.config.vscodePublicUrl || '').trim() || undefined,
+        basePath: PROXY_PATH,
         extension: assistant ? CONTINUE_EXTENSION : undefined,
         env: assistant ? { CONTINUE_GLOBAL_DIR: continueDirectory() } : {},
         prepare: assistant ? async () => {

@@ -29,7 +29,7 @@
   },
   "homepage": "https://github.com/huangdihd/llmhub-plugin-studio",
   "engines": {
-    "llmhub": "^1.4.0"
+    "llmhub": "^1.6.0"
   },
   "devDependencies": {
     "yaml": "^2.8.0"
@@ -75,7 +75,7 @@
       },
       {
         "key": "vscodeHost",
-        "label": "VS Code server address",
+        "label": "VS Code server address (keep 127.0.0.1: LLMHub proxies it)",
         "type": "text",
         "default": "127.0.0.1"
       },
@@ -84,12 +84,6 @@
         "label": "VS Code server port",
         "type": "number",
         "default": 3100
-      },
-      {
-        "key": "vscodePublicUrl",
-        "label": "VS Code public HTTPS URL (behind your reverse proxy)",
-        "type": "text",
-        "default": ""
       }
     ],
     "contributes": {

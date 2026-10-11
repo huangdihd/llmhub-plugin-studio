@@ -8,7 +8,7 @@ import { join } from 'node:path'
 import { Readable } from 'node:stream'
 import test from 'node:test'
 import { parse } from 'yaml'
-import plugin, { gatewayUrl, listModels } from '../index.mjs'
+import plugin, { dashboardOrigin, gatewayUrl, listModels, PROXY_PATH } from '../index.mjs'
 import { continueConfig, GUIDE } from '../lib/continue.mjs'
 import { TEMPLATES } from '../lib/templates.mjs'
 import { findCommand, flavorOf, VSCodeServer } from '../lib/vscode.mjs'
@@ -19,9 +19,9 @@ const temporary = async t => {
   t.after(() => rm(directory, { recursive: true, force: true }))
   return directory
 }
-const event = body => {
+const event = (body, headers = { host: 'hub.example:3000' }) => {
   const req = Readable.from(body === undefined ? [] : [Buffer.from(JSON.stringify(body))])
-  req.headers = {}
+  req.headers = headers
   return { node: { req } }
 }
 const wait = async (condition, message) => {
@@ -112,7 +112,7 @@ test('a VS Code server is found, gets Continue, starts on the plugin folder and 
   const server = new VSCodeServer({ warn() {} })
   t.after(() => server.stop())
   let prepared = 0
-  const options = { command: launcher, host: '127.0.0.1', port: 3999, folder, extension: 'Continue.continue', env: { CONTINUE_GLOBAL_DIR: '/tmp/continue' }, prepare: async () => { prepared++; return 'note' } }
+  const options = { command: launcher, host: '127.0.0.1', port: 3999, folder, basePath: '/base', extension: 'Continue.continue', env: { CONTINUE_GLOBAL_DIR: '/tmp/continue' }, prepare: async () => { prepared++; return 'note' } }
   assert.equal(server.start(options).running, false)
   await wait(() => server.status().running, 'the server starts in the background')
   const status = server.status()
@@ -126,11 +126,14 @@ test('a VS Code server is found, gets Continue, starts on the plugin folder and 
   assert.match(token, /^[0-9a-f]{48}$/)
   assert.deepEqual(args.slice(0, 4), ['--host', '127.0.0.1', '--port', '3999'])
   assert.equal(args[args.indexOf('--default-folder') + 1], folder)
-  assert.equal(status.url, `http://127.0.0.1:3999/?tkn=${token}&folder=${encodeURIComponent(folder)}`)
+  assert.equal(args[args.indexOf('--server-base-path') + 1], '/base')
+  assert.equal(status.path, `/base/?tkn=${token}&folder=${encodeURIComponent(folder)}`)
+  assert.equal(server.upstream(), 'http://127.0.0.1:3999/base', 'OpenVSCode Server expects the prefix')
   assert.deepEqual(JSON.parse(await readFile(join(bin, 'env.json'), 'utf8')), { CONTINUE_GLOBAL_DIR: '/tmp/continue' })
 
   const serverPid = Number(await readFile(join(bin, 'server.pid'), 'utf8'))
   assert.equal(server.stop().running, false)
+  assert.equal(server.upstream(), null)
   await wait(() => !alive(serverPid), 'the server the launcher started is stopped too')
 
   // Installed already: no second installation.
@@ -155,7 +158,9 @@ test('routes list and create plugins and start VS Code with Continue pointed at 
   const gateway = await fakeGateway(t)
   const launcher = await fakeLauncher(bin)
   const routes = new Map()
+  const proxies = new Map()
   const api = {
+    registerProxy: (id, target) => proxies.set(id, target),
     config: { workspace: join(root, 'plugins'), apiKey: 'sk-1', model: 'b/model', gatewayUrl: gateway.url, vscodeCommand: launcher, vscodePort: 3998 },
     registerRoute: (method, path, handler) => routes.set(`${method} ${path}`, handler),
     logger: { info() {}, warn() {}, error() {} }
@@ -171,7 +176,10 @@ test('routes list and create plugins and start VS Code with Continue pointed at 
 
   await call('POST vscode/start', { project: 'demo' })
   await wait(async () => (await call('GET vscode')).running, 'VS Code starts')
-  assert.equal((await call('GET vscode')).folder, join(root, 'plugins/demo'))
+  const running = await call('GET vscode')
+  assert.equal(running.folder, join(root, 'plugins/demo'))
+  assert.match(running.url, new RegExp(`^http://hub\\.example:3000${PROXY_PATH}/\\?tkn=`), 'served by LLMHub at the dashboard address')
+  assert.equal(proxies.get('vscode')(), `http://127.0.0.1:3998${PROXY_PATH}`)
   const directory = JSON.parse(await readFile(join(bin, 'env.json'), 'utf8')).CONTINUE_GLOBAL_DIR
   assert.equal(directory, join(root, 'plugin-studio/continue'), 'outside the scanned plugin folder')
   const config = parse(await readFile(join(directory, 'config.yaml'), 'utf8'))
@@ -180,4 +188,13 @@ test('routes list and create plugins and start VS Code with Continue pointed at 
   await assert.rejects(call('POST vscode/start', { project: '../x' }), /plugin ID/)
   await cleanup()
   assert.equal((await call('GET vscode')).running, false)
+  assert.equal(proxies.get('vscode')(), null)
+})
+
+test('the editor link uses the address the browser used for the dashboard', () => {
+  const at = (headers, encrypted = false) => ({ node: { req: { headers, socket: { encrypted } } } })
+  assert.equal(dashboardOrigin(at({ host: 'hub:3000' })), 'http://hub:3000')
+  assert.equal(dashboardOrigin(at({ host: 'hub' }, true)), 'https://hub')
+  assert.equal(dashboardOrigin(at({ host: 'internal', 'x-forwarded-host': 'hub.example.com', 'x-forwarded-proto': 'https' })), 'https://hub.example.com')
+  assert.equal(dashboardOrigin(at({ host: 'evil.example/"><script>' })), '')
 })
