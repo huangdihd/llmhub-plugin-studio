@@ -107,6 +107,9 @@ export default {
     }
     const toolsDirectory = () => resolve(root(), '..', 'plugin-studio', 'openvscode-server')
     const installer = new Installer(toolsDirectory())
+    const editorData = () => resolve(root(), '..', 'plugin-studio', 'vscode')
+    const followTheme = () => api.config.followTheme !== false
+    const theme = value => followTheme() && ['light', 'dark'].includes(value) ? value : undefined
     /** Settings first, then a server Plugin Studio downloaded, then one on PATH. */
     const command = async () => {
       const configured = String(api.config.vscodeCommand || '').trim()
@@ -147,7 +150,7 @@ export default {
       catch (error) { throw new WorkspaceError(error.message) }
     }))
     api.registerRoute('POST', 'vscode/start', answered(async event => {
-      const { project } = await readJson(event)
+      const { project, theme: dashboardTheme } = await readJson(event)
       const server = await command()
       if (!server) throw new WorkspaceError('No VS Code server yet. Download OpenVSCode Server below, or install one and set its path in Plugin Studio settings.')
       const folder = project ? workspace().directory(project) : root()
@@ -160,6 +163,9 @@ export default {
         host: String(api.config.vscodeHost || '127.0.0.1'),
         port: Math.floor(Number(api.config.vscodePort) || 3100),
         basePath: PROXY_PATH,
+        dataDirectory: editorData(),
+        theme: theme(dashboardTheme),
+        hideBuiltinChat: api.config.hideBuiltinChat !== false,
         extension: assistant ? CONTINUE_EXTENSION : undefined,
         env: assistant ? { CONTINUE_GLOBAL_DIR: continueDirectory() } : {},
         prepare: assistant ? async () => {
@@ -169,6 +175,10 @@ export default {
       })
     }))
     api.registerRoute('POST', 'vscode/stop', () => vscode.stop())
+    api.registerRoute('POST', 'vscode/theme', answered(async event => {
+      const value = theme((await readJson(event)).theme)
+      return { applied: value ? await vscode.setTheme(value) : false }
+    }))
 
     api.registerRoute('POST', 'api-key', answered(async event => {
       if (api.config.apiKey) throw new WorkspaceError('An API key is already set in Plugin Studio settings')

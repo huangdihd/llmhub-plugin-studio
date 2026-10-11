@@ -58,8 +58,8 @@ const { appendFileSync, writeFileSync, existsSync } = require('fs')
 const at = name => ${JSON.stringify(directory)} + '/' + name
 const args = process.argv.slice(2)
 appendFileSync(at('calls.log'), JSON.stringify(args) + '\\n')
-if (args[0] === '--list-extensions') { console.log(existsSync(at('installed')) ? 'continue.continue' : 'other.extension'); process.exit(0) }
-if (args[0] === '--install-extension') { writeFileSync(at('installed'), ''); process.exit(0) }
+if (args.includes('--list-extensions')) { console.log(existsSync(at('installed')) ? 'continue.continue' : 'other.extension'); process.exit(0) }
+if (args.includes('--install-extension')) { writeFileSync(at('installed'), ''); process.exit(0) }
 writeFileSync(at('env.json'), JSON.stringify({ CONTINUE_GLOBAL_DIR: process.env.CONTINUE_GLOBAL_DIR }))
 const server = require('child_process').spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], { stdio: 'ignore' })
 writeFileSync(at('server.pid'), String(server.pid))
@@ -195,9 +195,19 @@ test('routes list and create plugins and start VS Code with Continue pointed at 
   assert.deepEqual(overview.apiKey, { source: 'settings' })
   assert.match((await call('POST api-key', {})).error, /already set in Plugin Studio settings/)
 
-  await call('POST vscode/start', { project: 'demo' })
+  await call('POST vscode/start', { project: 'demo', theme: 'dark' })
   await wait(async () => (await call('GET vscode')).running, 'VS Code starts')
   const running = await call('GET vscode')
+  // Its own data folder, the dashboard's theme, and the helper that closes the built-in chat.
+  const editorData = join(root, 'plugin-studio/vscode')
+  const launched = (await readFile(join(bin, 'calls.log'), 'utf8')).trim().split('\n').map(line => JSON.parse(line))
+  assert.ok(launched.every(args => args[args.indexOf('--server-data-dir') + 1] === editorData), 'extension commands and the server share one data folder')
+  const machineSettings = join(editorData, 'data/Machine/settings.json')
+  assert.equal(JSON.parse(await readFile(machineSettings, 'utf8'))['workbench.colorTheme'], 'Default Dark Modern')
+  assert.match(await readFile(join(editorData, 'extensions/llmhub.plugin-studio-helper-1.0.0/extension.js'), 'utf8'), /closeAuxiliaryBar/)
+  assert.deepEqual(await call('POST vscode/theme', { theme: 'light' }), { applied: true })
+  assert.equal(JSON.parse(await readFile(machineSettings, 'utf8'))['workbench.colorTheme'], 'Default Light Modern', 'a running editor follows the toggle')
+  assert.deepEqual(await call('POST vscode/theme', { theme: 'purple' }), { applied: false })
   assert.equal(running.folder, join(root, 'plugins/demo'))
   assert.match(running.url, new RegExp(`^http://hub\\.example:3000${PROXY_PATH}/\\?tkn=`), 'served by LLMHub at the dashboard address')
   assert.equal(proxies.get('vscode')(), `http://127.0.0.1:3998${PROXY_PATH}`)
@@ -299,4 +309,24 @@ test('expected failures reach the panel as messages', async () => {
   assert.deepEqual(await answered(async () => { throw new WorkspaceError('No VS Code server yet') })({}), { error: 'No VS Code server yet' })
   await assert.rejects(answered(async () => { throw new TypeError('bug') })({}), /bug/, 'unexpected failures still fail')
   assert.deepEqual(await answered(async () => ({ ok: true }))({}), { ok: true })
+})
+
+test('the theme is written into existing settings without losing them, and never into commented files', async t => {
+  const { writeTheme, setupHelper } = await import('../lib/editor-setup.mjs')
+  const directory = await temporary(t)
+  const file = join(directory, 'Machine/settings.json')
+  assert.equal(await writeTheme(file, 'dark'), true)
+  await writeFile(file, JSON.stringify({ 'editor.fontSize': 15, 'workbench.colorTheme': 'Default Dark Modern' }))
+  assert.equal(await writeTheme(file, 'light'), true)
+  assert.deepEqual(JSON.parse(await readFile(file, 'utf8')), { 'editor.fontSize': 15, 'workbench.colorTheme': 'Default Light Modern' })
+  await writeFile(file, '// mine\n{}')
+  assert.equal(await writeTheme(file, 'dark'), false)
+  assert.equal(await readFile(file, 'utf8'), '// mine\n{}')
+  assert.equal(await writeTheme(file, 'sepia'), false)
+
+  await setupHelper(join(directory, 'extensions'), true)
+  const manifest = JSON.parse(await readFile(join(directory, 'extensions/llmhub.plugin-studio-helper-1.0.0/package.json'), 'utf8'))
+  assert.equal(manifest.capabilities.untrustedWorkspaces.supported, true, 'works before the folder is trusted')
+  await setupHelper(join(directory, 'extensions'), false)
+  await assert.rejects(readFile(join(directory, 'extensions/llmhub.plugin-studio-helper-1.0.0/package.json')))
 })

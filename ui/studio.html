@@ -215,7 +215,7 @@
     const refresh = () => call('vscode').then(renderStatus).catch(error => show('error', error.message))
     async function start(project) {
       show('error', '')
-      try { await call('vscode/start', { method: 'POST', body: { project } }); refresh() }
+      try { await call('vscode/start', { method: 'POST', body: { project, theme: llmhub.theme } }); refresh() }
       catch (error) { show('error', error.message) }
     }
     $('stop').addEventListener('click', () => call('vscode/stop', { method: 'POST', body: {} }).then(refresh))
@@ -261,6 +261,8 @@
       if (event.key === 'Enter' && event.target.tagName === 'INPUT' && event.target.type !== 'radio') { event.preventDefault(); create() }
     })
 
+    // The editor follows the dashboard: a running one switches when the theme is toggled.
+    addEventListener('llmhub:theme', event => { call('vscode/theme', { method: 'POST', body: { theme: event.detail } }).catch(() => {}) })
     load().catch(error => show('error', error.message))
     refresh()
   </script>

@@ -40,6 +40,16 @@ Continue's sidebar uses, need a secure page unless the address is `localhost`.
 With `code serve-web`, install Continue yourself from the Extensions view; the configuration is
 still written for it.
 
+## The editor
+
+- It follows the dashboard's light or dark theme, including when you toggle it while VS Code is
+  open (turn off with *VS Code follows the dashboard's theme*).
+- VS Code's built-in chat panel ("Build with agent mode") needs GitHub Copilot and does nothing
+  here, so a small bundled helper extension closes it on start; Continue, in the activity bar, is
+  the assistant (turn off with *Close VS Code's built-in Copilot chat*).
+- VS Code keeps its settings and extensions in `.data/plugin-studio/vscode/`, apart from any VS
+  Code you run elsewhere.
+
 ## Settings
 
 | Setting | Default | Meaning |
